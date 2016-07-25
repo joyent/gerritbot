@@ -21,6 +21,7 @@ const mod_tls = require('tls');
 const mod_cproc = require('child_process');
 const mod_lstream = require('lstream');
 const mod_vsjson = require('vstream-json-parser');
+const mod_events = require('events');
 
 var config = JSON.parse(
     mod_fs.readFileSync('etc/config.json').toString('utf-8'));
@@ -69,7 +70,7 @@ function spawnWorker() {
 		Env: [],
 		Cmd: [
 			'/usr/bin/bash', '-c',
-			'export PATH=/opt/local/bin:/opt/local/sbin:$PATH; pkgin -y up && pkgin -y in nodejs git-base && curl -L https://github.com/arekinath/gerritbot/archive/master.tar.gz | gtar -zxvf - && cd gerritbot-master && npm install && node ./agent.js ' + config.my_name + ' ' + config.port + ' ' + COOKIE
+			'export PATH=/opt/local/bin:/opt/local/sbin:$PATH; pkgin -y up && pkgin -y in nodejs && curl -L https://github.com/arekinath/gerritbot/archive/master.tar.gz | gtar -zxvf - && cd gerritbot-master && npm install ws && node ./agent.js ' + config.my_name + ' ' + config.port + ' ' + COOKIE
 		],
 		Entrypoint: [],
 		Image: config.slaves.image,
@@ -95,9 +96,9 @@ function spawnWorker() {
 			--spawning;
 			log.error(err, 'spawning docker container');
 		} else {
-			var cid = obj.Id.slice(0, 7);
+			var cid = obj.Id.slice(0, 12);
 			log.info('created docker container %s', cid);
-			client.post('/containers/' + obj.Id + '/start',
+			client.post('/containers/' + cid + '/start',
 			    function (err2) {
 				if (err2) {
 					--spawning;
@@ -133,13 +134,6 @@ function SlaveConnection(opts) {
 	this.sc_ws = undefined;
 	if (this.sc_log === undefined)
 		this.sc_log = bunyan.createLogger({ name: 'connection '});
-	var req = this.sc_ws.upgradeReq;
-	var sock = req.socket;
-	this.sc_log = this.sc_log.child({
-		client: { address: sock.remoteAddress, port: sock.remotePort },
-		headers: req.headers
-	});
-	this.sc_log.info('awaiting authentication');
 	this.sc_config = opts.config;
 	this.sc_uuid = undefined;
 	slaves.push(this);
@@ -151,6 +145,12 @@ mod_util.inherits(SlaveConnection, mod_fsm.FSM);
 SlaveConnection.prototype.accept = function (ws) {
 	mod_assert.strictEqual(this.getState(), 'idle');
 	this.sc_ws = ws;
+	var req = this.sc_ws.upgradeReq;
+	var sock = req.socket;
+	this.sc_log = this.sc_log.child({
+		client: { address: sock.remoteAddress, port: sock.remotePort },
+		headers: req.headers
+	});
 	this.emit('acceptAsserted');
 };
 

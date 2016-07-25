@@ -41,6 +41,10 @@ function connect() {
 		}));
 	});
 	client.on('message', onMessage);
+	client.on('error', function (err) {
+		console.error(err.stack);
+		onClose();
+	});
 	client.on('close', function onClose() {
 		clearTimeout(timer);
 		if (--retries > 0) {
