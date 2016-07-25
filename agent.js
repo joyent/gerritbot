@@ -17,7 +17,7 @@ var COOKIE = process.argv[3];
 process.chdir('/tmp');
 process.env.PATH = '/opt/local/sbin:/opt/local/bin:' + process.env.PATH;
 
-var UUID = mod_cp.spawnSync('zonename').stdout.toString('ascii').strip();
+var UUID = mod_cp.spawnSync('zonename').stdout.toString('ascii').trim();
 
 var client;
 var retries = 3;

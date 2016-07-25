@@ -34,18 +34,15 @@ var log = mod_bunyan.createLogger({ name: 'gerritbot' });
 
 var dockerKeyPem = mod_fs.readFileSync(config.docker.keyFile);
 var dockerKey = mod_sshpk.parsePrivateKey(dockerKeyPem);
-var id = mod_sshpk.identityForUser(config.docker.user);
+var id = mod_sshpk.identityFromDN('CN=' + config.docker.user);
 var cert = mod_sshpk.createSelfSignedCertificate(id, dockerKey);
 
-var context = mod_tls.createSecureContext({
-	key: dockerKeyPem,
-	cert: cert.toBuffer('pem')
-});
 var dockerClients = config.docker.hosts.map(function (host) {
 	return (mod_restify.createJsonClient({
 		url: 'https://' + host + ':2376',
-		secureContext: context,
-		rejectUnauthorized: false
+		rejectUnauthorized: false,
+		key: dockerKeyPem,
+		cert: cert.toBuffer('pem')
 	}));
 });
 function docker() {
@@ -72,9 +69,9 @@ function spawnWorker() {
 		Env: [],
 		Cmd: [
 			'/usr/bin/bash', '-c',
-			'/opt/local/bin/pkgin -y up && /opt/local/bin/pkgin -y in nodejs && curl -L https://github.com/arekinath/gerritbot/archive/master.tar.gz | tar -zxvf - && cd gerritbot && /opt/local/bin/npm install && /opt/local/bin/node ./agent.js ' + config.my_name + ' ' + config.port + ' ' + COOKIE
+			'export PATH=/opt/local/bin:/opt/local/sbin:$PATH; pkgin -y up && pkgin -y in nodejs git-base && curl -L https://github.com/arekinath/gerritbot/archive/master.tar.gz | gtar -zxvf - && cd gerritbot-master && npm install && node ./agent.js ' + config.my_name + ' ' + config.port + ' ' + COOKIE
 		],
-		Entrypoint: '',
+		Entrypoint: [],
 		Image: config.slaves.image,
 		Labels: {},
 		Volumes: {},
@@ -90,14 +87,26 @@ function spawnWorker() {
 			Dns: ['8.8.8.8', '8.8.4.4']
 		}
 	};
+	var client = docker();
 	++spawning;
-	docker().post('/containers/create', payload,
+	client.post('/containers/create', payload,
 	    function (err, req, res, obj) {
 		if (err) {
 			--spawning;
 			log.error(err, 'spawning docker container');
 		} else {
-			log.info('spawned docker container %s', obj.Id);
+			log.info('created docker container %s', obj.Id);
+			client.post('/containers/' + obj.Id + '/start',
+			    function (err2) {
+				if (err2) {
+					--spawning;
+					log.error(err2,
+					    'starting docker container');
+				} else {
+					log.info('started docker container %s',
+					    obj.Id);
+				}
+			});
 		}
 	})
 }
@@ -128,6 +137,7 @@ function SlaveConnection(opts) {
 		client: { address: sock.remoteAddress, port: sock.remotePort },
 		headers: req.headers
 	});
+	this.sc_log.info('awaiting authentication');
 	this.sc_config = opts.config;
 	this.sc_uuid = undefined;
 	slaves.push(this);
@@ -164,9 +174,12 @@ SlaveConnection.prototype.state_auth = function (on, once, timeout) {
 			return;
 		}
 		if (msg.cookie === COOKIE) {
-			self.sc_log.debug('authenticated slave %s', msg.uuid);
+			self.sc_log.info('authenticated slave %s', msg.uuid);
 			self.sc_uuid = msg.uuid;
 			self.gotoState('setup');
+		} else {
+			self.sc_log.warn('failed to auth slave, disconnecting');
+			self.gotoState('closing');
 		}
 	});
 	on(this.sc_ws, 'close', function () {
@@ -289,6 +302,7 @@ SlaveConnection.prototype.state_setup.npm = function (on) {
 
 SlaveConnection.prototype.state_ready = function (on) {
 	var self = this;
+	this.sc_log.info('ready');
 	on(this.sc_ws, 'message', function onMessage(msg) {
 		try {
 			msg = JSON.parse(msg);
@@ -405,6 +419,8 @@ SlaveConnection.prototype.release = function () {
 };
 
 SlaveConnection.prototype.state_running = function (on) {
+	this.sc_log.info('building %s #%d (ps %d)', this.sc_change.project,
+	    this.sc_change.number, this.sc_patchset.number);
 	on(this.sc_ws, 'message', function onMessage(msg) {
 		try {
 			msg = JSON.parse(msg);
@@ -513,7 +529,7 @@ evs.on('readable', function () {
 		if (event.type === 'patchset-created' &&
 		    event.patchSet.kind === 'REWORK' &&
 		    event.patchSet.isDraft === false) {
-			handleNewPatchset(event.patchSet, event.change);
+			handleNewPatchset(event.change, event.patchSet);
 		}
 	}
 });
@@ -542,6 +558,8 @@ vsjson.on('readable', function () {
 
 var queue = [];
 function handleNewPatchset(change, ps) {
+	log.info('queued %s %d (#%d)',
+	    change.project, change.number, ps.number);
 	queue.push([change, ps]);
 	runQueue();
 }
