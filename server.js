@@ -18,6 +18,9 @@ const mod_stream = require('stream');
 const mod_restify = require('restify-clients');
 const mod_sshpk = require('sshpk');
 const mod_tls = require('tls');
+const mod_cproc = require('child_process');
+const mod_lstream = require('lstream');
+const mod_vsjson = require('vstream-json-parser');
 
 var config = JSON.parse(
     mod_fs.readFileSync('etc/config.json').toString('utf-8'));
@@ -31,8 +34,8 @@ var log = mod_bunyan.createLogger({ name: 'gerritbot' });
 
 var dockerKeyPem = mod_fs.readFileSync(config.docker.keyFile);
 var dockerKey = mod_sshpk.parsePrivateKey(dockerKeyPem);
-var id = mod_sshpk.Identity.forUser(config.docker.user);
-var cert = mod_sshpk.Certificate.createSelfSigned(id, dockerKey);
+var id = mod_sshpk.identityForUser(config.docker.user);
+var cert = mod_sshpk.createSelfSignedCertificate(id, dockerKey);
 
 var context = mod_tls.createSecureContext({
 	key: dockerKeyPem,
@@ -51,10 +54,56 @@ function docker() {
 	return (dockerClients[idx]);
 }
 
+const COOKIE = mod_crypto.randomBytes(8).toString('base64');
+
+var spawning = 0;
+
+function spawnWorker() {
+	var payload = {
+		Hostname: '',
+		Domainname: '',
+		User: '',
+		AttachStdin: false,
+		AttachStdout: false,
+		AttachStderr: false,
+		Tty: false,
+		OpenStdin: false,
+		StdinOnce: false,
+		Env: [],
+		Cmd: [
+			'/usr/bin/bash', '-c',
+			'/opt/local/bin/pkgin -y up && /opt/local/bin/pkgin -y in nodejs && curl -L https://github.com/arekinath/gerritbot/archive/master.tar.gz | tar -zxvf - && cd gerritbot && /opt/local/bin/npm install && /opt/local/bin/node ./agent.js ' + config.my_name + ' ' + config.port + ' ' + COOKIE
+		],
+		Entrypoint: '',
+		Image: config.slaves.image,
+		Labels: {},
+		Volumes: {},
+		WorkingDir: '',
+		NetworkDisabled: false,
+		ExposedPorts: {},
+		StopSignal: 'SIGTERM',
+		HostConfig: {
+			Binds: [],
+			Links: [],
+			LxcConf: {'lxc.utsname': 'docker'},
+			Memory: 2048*1024*1024,
+			Dns: ['8.8.8.8', '8.8.4.4']
+		}
+	};
+	++spawning;
+	docker().post('/containers/create', payload,
+	    function (err, req, res, obj) {
+		if (err) {
+			--spawning;
+			log.error(err, 'spawning docker container');
+		} else {
+			log.info('spawned docker container %s', obj.Id);
+		}
+	})
+}
+
 var slaves = [];
 var server = new mod_ws.Server({ port: config.port });
-
-const COOKIE = mod_crypto.randomBytes(8).toString('base64');
 
 server.on('connection', function onConnection(ws) {
 	var conn = new SlaveConnection({
@@ -62,6 +111,7 @@ server.on('connection', function onConnection(ws) {
 		log: log
 	});
 	conn.accept(ws);
+	runQueue();
 });
 
 function SlaveConnection(opts) {
@@ -81,6 +131,7 @@ function SlaveConnection(opts) {
 	this.sc_config = opts.config;
 	this.sc_uuid = undefined;
 	slaves.push(this);
+	--spawning;
 	mod_fsm.FSM.call(this, 'idle');
 }
 mod_util.inherits(SlaveConnection, mod_fsm.FSM);
@@ -139,27 +190,7 @@ SlaveConnection.prototype.state_setup = function (on) {
 	on(this.sc_ws, 'close', function () {
 		self.gotoState('closing');
 	});
-	self.gotoState('setup.pkgsrc_up');
-};
-
-SlaveConnection.prototype.state_setup.pkgsrc_up = function (on) {
-	var self = this;
-	var kid = this.spawn('pfexec',
-	    ['/opt/local/bin/pkgin', '-fy', 'up']);
-	var errOut = '';
-	on(kid.stderr, 'data', function (data) {
-		errOut = errOut + data.toString('utf-8');
-	});
-	on(kid, 'close', function (exitStatus) {
-		if (exitStatus === 0) {
-			self.gotoState('setup.pkgsrc_fug');
-			return;
-		}
-		self.sc_log.error('failed to run pkgin up in zone',
-		    {stderr: errOut});
-		self.gotoState('closing');
-		return;
-	});
+	self.gotoState('setup.pkgsrc_fug');
 };
 
 SlaveConnection.prototype.state_setup.pkgsrc_fug = function (on) {
@@ -323,6 +354,24 @@ SlaveConnection.prototype.spawn = function (cmd, args, opts) {
 	return (emitter);
 };
 
+SlaveConnection.prototype.chdir = function (dir) {
+	var self = this;
+	mod_assert.string(dir, 'dir');
+
+	var cookie = mod_crypto.randomBytes(9).toString('base64');
+	var req = {};
+	req.cookie = cookie;
+	req.op = 'chdir';
+	req.dir = dir;
+
+	var emitter = new mod_events.EventEmitter();
+	this.sc_kids[cookie] = emitter;
+
+	this.sc_ws.send(JSON.stringify(req));
+
+	return (emitter);
+};
+
 SlaveConnection.prototype.state_ready = function (on) {
 	on(this.sc_ws, 'message', function onMessage(msg) {
 		try {
@@ -335,12 +384,113 @@ SlaveConnection.prototype.state_ready = function (on) {
 		}
 		self.emit('message', msg);
 	});
+	on(this, 'claimAsserted', function () {
+		self.gotoState('running');
+	});
 	on(this.sc_ws, 'close', function () {
 		self.gotoState('closing');
 	});
 };
 
+SlaveConnection.prototype.build = function (change, patchset) {
+	mod_assert.strictEqual(this.getState(), 'ready');
+	this.sc_change = change;
+	this.sc_patchset = patchset;
+	this.emit('claimAsserted');
+};
+
+SlaveConnection.prototype.release = function () {
+	mod_assert.strictEqual(this.getState(), 'running');
+	this.emit('releaseAsserted');
+};
+
+SlaveConnection.prototype.state_running = function (on) {
+	on(this.sc_ws, 'message', function onMessage(msg) {
+		try {
+			msg = JSON.parse(msg);
+		} catch (e) {
+			self.sc_log.error(e,
+			    'failed to parse incoming message');
+			self.gotoState('closing');
+			return;
+		}
+		self.emit('message', msg);
+	});
+	on(this, 'releaseAsserted', function () {
+		self.gotoState('closing');
+	});
+	on(this.sc_ws, 'close', function () {
+		self.gotoState('closing');
+	});
+	self.gotoState('running.checkout');
+};
+
+SlaveConnection.prototype.state_running.checkout = function (on) {
+	var self = this;
+	var kid = this.spawn('git',
+	    ['clone',
+	    'https://' + config.gerrit.host + '/' + this.sc_change.project,
+	    'repo']);
+	var errOut = '';
+	on(kid.stderr, 'data', function (data) {
+		errOut = errOut + data.toString('utf-8');
+	});
+	on(kid, 'close', function (exitStatus) {
+		if (exitStatus === 0) {
+			self.gotoState('running.chdir');
+			return;
+		}
+		self.sc_log.error('failed to run command in zone',
+		    {stderr: errOut});
+		self.gotoState('closing');
+		return;
+	});
+};
+
+SlaveConnection.prototype.state_running.chdir = function (on) {
+	var self = this;
+	var emitter = this.chdir('repo');
+	on(emitter, 'done', function () {
+		self.gotoState('running.makecheck');
+	});
+	on(emitter, 'error', function () {
+		self.sc_log.error('failed to run command in zone',
+		    {stderr: errOut});
+		self.gotoState('closing');
+		return;
+	});
+};
+
+SlaveConnection.prototype.state_running.makecheck = function (on) {
+	var self = this;
+	var kid = this.spawn('gmake', ['check']);
+	var errOut = '';
+	var out = '';
+	on(kid.stderr, 'data', function (data) {
+		errOut += data.toString('utf-8');
+	});
+	on(kid.stdout, 'data', function (data) {
+		out += data.toString('utf-8');
+	});
+	on(kid, 'close', function (exitStatus) {
+		this.sc_out = out.split('\n');
+		this.sc_err = errOut.split('\n');
+		this.sc_status = exitStatus;
+		log.error({status: exitStatus, stdout: out, stderr: errOut},
+		    'make check done');
+		self.gotoState('running.report');
+	});
+};
+
+SlaveConnection.prototype.state_running.report = function (on) {
+	self.gotoState('closing');
+};
+
 SlaveConnection.prototype.state_closing = function () {
+	try {
+		this.sc_ws.send(JSON.stringify({ op: 'exit' }));
+	} catch (e) {
+	}
 	this.sc_ws.close();
 	var idx = slaves.indexOf(this);
 	mod_assert.notStrictEqual(idx, -1);
@@ -350,3 +500,62 @@ SlaveConnection.prototype.state_closing = function () {
 
 SlaveConnection.prototype.state_closed = function () {
 };
+
+for (var i = 0; i < config.spares; ++i)
+	spawnWorker();
+
+config.gerrit.log = log;
+var watcher = new mod_gw.GerritWatcher(config.gerrit);
+var evs = watcher.eventStream();
+evs.on('readable', function () {
+	var event;
+	while ((event = evs.read()) !== null) {
+		if (event.type === 'patchset-created' &&
+		    event.patchSet.kind === 'REWORK' &&
+		    event.patchSet.isDraft === false) {
+			handleNewPatchset(event.patchSet, event.change);
+		}
+	}
+});
+
+var kid = mod_cproc.spawn('ssh', ['-v', '-i', config.gerrit.keyFile,
+    '-p', config.gerrit.port, config.gerrit.user + '@' + config.gerrit.host,
+    'gerrit', 'query', '--format=JSON', '--patch-sets',
+    'status:open', 'AND', 'NOT', 'label:CI-Testing>=-1']);
+
+var outls = new mod_lstream();
+var vsjson = new mod_vsjson();
+
+kid.stdout.pipe(outls);
+outls.pipe(vsjson);
+
+vsjson.on('readable', function () {
+	var change;
+	while ((change = vsjson.read()) !== null) {
+		if (change.project === undefined || change.id === undefined)
+			continue;
+		var ps = change.patchSets[change.patchSets.length - 1];
+		if (ps.isDraft === false)
+			handleNewPatchset(change, ps);
+	}
+});
+
+var queue = [];
+function handleNewPatchset(change, ps) {
+	queue.push([change, ps]);
+	runQueue();
+}
+
+function runQueue() {
+	var spares = slaves.filter(function (s) {
+		return (s.getState() === 'ready');
+	});
+	while (spares.length + spawning < config.spares)
+		spawnWorker();
+	while (spares.length > 0 && queue.length > 0) {
+		var slave = spares.shift();
+		var item = queue.shift();
+		slave.build.apply(slave, item);
+	}
+}
+

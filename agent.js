@@ -14,6 +14,9 @@ var SERVER = process.argv[1];
 var PORT = parseInt(process.argv[2], 10);
 var COOKIE = process.argv[3];
 
+process.chdir('/tmp');
+process.env.PATH = '/opt/local/sbin:/opt/local/bin:' + process.env.PATH;
+
 var UUID = mod_cp.spawnSync('zonename').stdout.toString('ascii').strip();
 
 var client;
@@ -93,6 +96,21 @@ function onMessage(msg) {
 				exitStatus: status
 			}));
 		});
+	} else if (msg.op === 'chdir') {
+		try {
+			process.chdir(msg.dir);
+			client.send(JSON.stringify({
+				cookie: cookie,
+				event: 'done'
+			}));
+		} catch (e) {
+			client.send(JSON.stringify({
+				cookie: cookie,
+				event: 'error',
+				error: e.toString(),
+				stack: e.stack
+			}));
+		}
 	} else if (msg.op === 'kill') {
 		var res = mod_cp.spawnSync('kill', msg.args);
 		client.send(JSON.stringify({
