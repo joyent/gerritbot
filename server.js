@@ -73,7 +73,7 @@ function spawnWorker() {
 		],
 		Entrypoint: [],
 		Image: config.slaves.image,
-		Labels: {},
+		Labels: { 'buildbot.worker': 'true' },
 		Volumes: {},
 		WorkingDir: '',
 		NetworkDisabled: false,
@@ -95,16 +95,18 @@ function spawnWorker() {
 			--spawning;
 			log.error(err, 'spawning docker container');
 		} else {
-			log.info('created docker container %s', obj.Id);
+			var cid = obj.Id.slice(0, 7);
+			log.info('created docker container %s', cid);
 			client.post('/containers/' + obj.Id + '/start',
 			    function (err2) {
 				if (err2) {
 					--spawning;
 					log.error(err2,
-					    'starting docker container');
+					    'starting docker container %s',
+					    cid);
 				} else {
 					log.info('started docker container %s',
-					    obj.Id);
+					    cid);
 				}
 			});
 		}

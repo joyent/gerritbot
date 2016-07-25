@@ -10,12 +10,13 @@
 const mod_ws = require('ws');
 const mod_cp = require('child_process');
 
-var SERVER = process.argv[1];
-var PORT = parseInt(process.argv[2], 10);
-var COOKIE = process.argv[3];
+var SERVER = process.argv[2];
+var PORT = parseInt(process.argv[3], 10);
+var COOKIE = process.argv[4];
 
 process.chdir('/tmp');
-process.env.PATH = '/opt/local/sbin:/opt/local/bin:' + process.env.PATH;
+process.env.PATH =
+    '/opt/local/sbin:/opt/local/bin:/usr/gnu/bin:/usr/bin:/usr/sbin:/bin:/sbin';
 
 var UUID = mod_cp.spawnSync('zonename').stdout.toString('ascii').trim();
 
