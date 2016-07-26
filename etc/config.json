@@ -9,16 +9,13 @@
 		"keyFile": "./bot.id_rsa"
 	},
 	"docker": {
-		"hosts": [
-			"docker.staging-2.cns.joyent.us"
-		],
+		"host": "docker.staging-2.cns.joyent.us",
 		"user": "awilson",
 		"keyFile": "./sdc.id_rsa"
 	},
 	"slaves": {
 		"image": "96bcddda-beb7-11e5-af20-a3fb54c8ae29",
-		"package": "t4-standard-2G",
-		"pkgsrc": ["-nodejs", "nodejs-0.12", "build-essential"],
-		"npm": ["triton", "sshpk"]
+		"pkgsrc": ["-nodejs", "nodejs-0.10", "build-essential"],
+		"npm": []
 	}
 }

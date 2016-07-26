@@ -22,6 +22,8 @@ const mod_cproc = require('child_process');
 const mod_lstream = require('lstream');
 const mod_vsjson = require('vstream-json-parser');
 const mod_events = require('events');
+const mod_http = require('http');
+const mod_vasync = require('vasync');
 
 var config = JSON.parse(
     mod_fs.readFileSync('etc/config.json').toString('utf-8'));
@@ -33,30 +35,31 @@ if (config.port === undefined)
 
 var log = mod_bunyan.createLogger({ name: 'gerritbot' });
 
+var repoHasMakeCheck = {};
+repoHasMakeCheck['joyent/illumos-extra'] = false;
+repoHasMakeCheck['joyent/illumos-joyent'] = false;
+repoHasMakeCheck['joyent/zfs_snapshot_tar'] = false;
+repoHasMakeCheck['joyent/smartos-live'] = false;
+
 var dockerKeyPem = mod_fs.readFileSync(config.docker.keyFile);
 var dockerKey = mod_sshpk.parsePrivateKey(dockerKeyPem);
 var id = mod_sshpk.identityFromDN('CN=' + config.docker.user);
 var cert = mod_sshpk.createSelfSignedCertificate(id, dockerKey);
 
-var dockerClients = config.docker.hosts.map(function (host) {
-	return (mod_restify.createJsonClient({
-		url: 'https://' + host + ':2376',
-		rejectUnauthorized: false,
-		key: dockerKeyPem,
-		cert: cert.toBuffer('pem')
-	}));
+var docker = mod_restify.createJsonClient({
+	url: 'https://' + config.docker.host + ':2376',
+	rejectUnauthorized: false,
+	key: dockerKeyPem,
+	cert: cert.toBuffer('pem')
 });
-function docker() {
-	var rand = mod_crypto.randomBytes(4).readUInt32BE(0);
-	var idx = rand % dockerClients.length;
-	return (dockerClients[idx]);
-}
 
 const COOKIE = mod_crypto.randomBytes(8).toString('base64');
 
 var spawning = 0;
 
 function spawnWorker() {
+	var agentUrl =
+	    'http://' + config.my_name + ':' + config.port + '/agent.js';
 	var payload = {
 		Hostname: '',
 		Domainname: '',
@@ -70,13 +73,24 @@ function spawnWorker() {
 		Env: [],
 		Cmd: [
 			'/usr/bin/bash', '-c',
-			'export PATH=/opt/local/bin:/opt/local/sbin:$PATH; pkgin -y up && pkgin -y in nodejs && curl -L https://github.com/arekinath/gerritbot/archive/master.tar.gz | gtar -zxvf - && cd gerritbot-master && npm install ws && node ./agent.js ' + config.my_name + ' ' + config.port + ' ' + COOKIE
+			'export PATH=/opt/local/bin:/opt/local/sbin:$PATH; ' +
+			'useradd -P "Primary Administrator" -s /usr/bin/bash ' +
+				'-m build && ' +
+			'pkgin -y up && ' +
+			'pkgin -y in nodejs && ' +
+			'curl -O ' + agentUrl + ' && ' +
+			'npm install ws && ' +
+			'/usr/lib/pfexecd && ' +
+			'exec su - build -c "' +
+				'exec node /tmp/agent.js ' + config.my_name +
+				' ' + config.port + ' ' + COOKIE +
+			'"'
 		],
 		Entrypoint: [],
 		Image: config.slaves.image,
 		Labels: { 'buildbot.worker': 'true' },
 		Volumes: {},
-		WorkingDir: '',
+		WorkingDir: '/tmp',
 		NetworkDisabled: false,
 		ExposedPorts: {},
 		StopSignal: 'SIGTERM',
@@ -88,9 +102,8 @@ function spawnWorker() {
 			Dns: ['8.8.8.8', '8.8.4.4']
 		}
 	};
-	var client = docker();
 	++spawning;
-	client.post('/containers/create', payload,
+	docker.post('/containers/create', payload,
 	    function (err, req, res, obj) {
 		if (err) {
 			--spawning;
@@ -98,7 +111,7 @@ function spawnWorker() {
 		} else {
 			var cid = obj.Id.slice(0, 12);
 			log.info('created docker container %s', cid);
-			client.post('/containers/' + cid + '/start',
+			docker.post('/containers/' + cid + '/start',
 			    function (err2) {
 				if (err2) {
 					--spawning;
@@ -115,7 +128,8 @@ function spawnWorker() {
 }
 
 var slaves = [];
-var server = new mod_ws.Server({ port: config.port });
+var httpServer = mod_http.createServer();
+var server = new mod_ws.Server({ server: httpServer });
 
 server.on('connection', function onConnection(ws) {
 	var conn = new SlaveConnection({
@@ -125,6 +139,18 @@ server.on('connection', function onConnection(ws) {
 	conn.accept(ws);
 	runQueue();
 });
+
+httpServer.on('request', function (req, res) {
+	if (req.url === '/agent.js') {
+		res.writeHead(200);
+		mod_fs.createReadStream('./agent.js').pipe(res);
+	} else {
+		res.writeHead(404);
+		res.end();
+	}
+});
+
+httpServer.listen(config.port);
 
 function SlaveConnection(opts) {
 	mod_assert.object(opts, 'options');
@@ -136,6 +162,7 @@ function SlaveConnection(opts) {
 		this.sc_log = bunyan.createLogger({ name: 'connection '});
 	this.sc_config = opts.config;
 	this.sc_uuid = undefined;
+	this.sc_kids = {};
 	slaves.push(this);
 	--spawning;
 	mod_fsm.FSM.call(this, 'idle');
@@ -148,8 +175,7 @@ SlaveConnection.prototype.accept = function (ws) {
 	var req = this.sc_ws.upgradeReq;
 	var sock = req.socket;
 	this.sc_log = this.sc_log.child({
-		client: { address: sock.remoteAddress, port: sock.remotePort },
-		headers: req.headers
+		client: sock.remoteAddress + ':' + sock.remotePort
 	});
 	this.emit('acceptAsserted');
 };
@@ -177,7 +203,8 @@ SlaveConnection.prototype.state_auth = function (on, once, timeout) {
 		}
 		if (msg.cookie === COOKIE) {
 			self.sc_log.info('authenticated slave %s', msg.uuid);
-			self.sc_uuid = msg.uuid;
+			self.sc_uuid = msg.uuid.replace(/-/g, '');
+			self.sc_log = self.sc_log.child({ uuid: this.sc_uuid });
 			self.gotoState('setup');
 		} else {
 			self.sc_log.warn('failed to auth slave, disconnecting');
@@ -205,27 +232,7 @@ SlaveConnection.prototype.state_setup = function (on) {
 	on(this.sc_ws, 'close', function () {
 		self.gotoState('closing');
 	});
-	self.gotoState('setup.pkgsrc_fug');
-};
-
-SlaveConnection.prototype.state_setup.pkgsrc_fug = function (on) {
-	var self = this;
-	var kid = this.spawn('pfexec',
-	    ['/opt/local/bin/pkgin', '-y', 'fug']);
-	var errOut = '';
-	on(kid.stderr, 'data', function (data) {
-		errOut = errOut + data.toString('utf-8');
-	});
-	on(kid, 'close', function (exitStatus) {
-		if (exitStatus === 0) {
-			self.gotoState('setup.pkgsrc');
-			return;
-		}
-		self.sc_log.error('failed to run pkgin fug in zone',
-		    {stderr: errOut});
-		self.gotoState('closing');
-		return;
-	});
+	self.gotoState('setup.pkgsrc');
 };
 
 SlaveConnection.prototype.state_setup.pkgsrc = function (on) {
@@ -304,7 +311,7 @@ SlaveConnection.prototype.state_setup.npm = function (on) {
 
 SlaveConnection.prototype.state_ready = function (on) {
 	var self = this;
-	this.sc_log.info('ready');
+	this.sc_log.info('ready to rock');
 	on(this.sc_ws, 'message', function onMessage(msg) {
 		try {
 			msg = JSON.parse(msg);
@@ -316,9 +323,327 @@ SlaveConnection.prototype.state_ready = function (on) {
 		}
 		self.handleMessage(msg);
 	});
+	on(this, 'claimAsserted', function () {
+		self.gotoState('running');
+	});
 	on(this.sc_ws, 'close', function () {
 		self.gotoState('closing');
 	});
+	runQueue();
+};
+
+SlaveConnection.prototype.build = function (change, patchset) {
+	mod_assert.strictEqual(this.getState(), 'ready');
+	this.sc_change = change;
+	this.sc_patchset = patchset;
+	this.emit('claimAsserted');
+};
+
+SlaveConnection.prototype.release = function () {
+	mod_assert.strictEqual(this.getState(), 'running');
+	this.emit('releaseAsserted');
+};
+
+SlaveConnection.prototype.state_running = function (on) {
+	var self = this;
+	this.sc_log.info('building %s #%d (ps %d)', this.sc_change.project,
+	    this.sc_change.number, this.sc_patchset.number);
+	on(this.sc_ws, 'message', function onMessage(msg) {
+		try {
+			msg = JSON.parse(msg);
+		} catch (e) {
+			self.sc_log.error(e,
+			    'failed to parse incoming message');
+			self.gotoState('closing');
+			return;
+		}
+		self.handleMessage(msg);
+	});
+	on(this, 'releaseAsserted', function () {
+		self.gotoState('closing');
+	});
+	on(this.sc_ws, 'close', function () {
+		self.gotoState('closing');
+	});
+	self.gotoState('running.clone');
+};
+
+SlaveConnection.prototype.state_running.clone = function (on) {
+	var self = this;
+	var kid = this.spawn('git',
+	    ['clone',
+	    'https://' + config.gerrit.host + '/' + this.sc_change.project,
+	    '/tmp/repo']);
+	var errOut = '';
+	on(kid.stderr, 'data', function (data) {
+		errOut = errOut + data.toString('utf-8');
+	});
+	on(kid, 'close', function (exitStatus) {
+		if (exitStatus === 0) {
+			self.gotoState('running.chdir');
+			return;
+		}
+		self.sc_log.error('failed to run command in zone',
+		    {stderr: errOut});
+		self.gotoState('closing');
+		return;
+	});
+};
+
+SlaveConnection.prototype.state_running.chdir = function (on) {
+	var self = this;
+	var emitter = this.chdir('/tmp/repo');
+	on(emitter, 'done', function () {
+		self.gotoState('running.fetch');
+	});
+	on(emitter, 'error', function (err) {
+		self.sc_log.error(err, 'failed to chdir');
+		self.gotoState('closing');
+	});
+};
+
+SlaveConnection.prototype.state_running.fetch = function (on) {
+	var self = this;
+	var kid = this.spawn('git',
+	    ['fetch', 'origin', this.sc_patchset.ref]);
+	var errOut = '';
+	on(kid.stderr, 'data', function (data) {
+		errOut = errOut + data.toString('utf-8');
+	});
+	on(kid, 'close', function (exitStatus) {
+		if (exitStatus === 0) {
+			self.gotoState('running.checkout');
+			return;
+		}
+		self.sc_log.error('failed to run command in zone',
+		    {stderr: errOut});
+		self.gotoState('closing');
+		return;
+	});
+};
+
+SlaveConnection.prototype.state_running.checkout = function (on) {
+	var self = this;
+	var kid = this.spawn('git',
+	    ['checkout', '-f', 'FETCH_HEAD']);
+	var errOut = '';
+	on(kid.stderr, 'data', function (data) {
+		errOut = errOut + data.toString('utf-8');
+	});
+	on(kid, 'close', function (exitStatus) {
+		if (exitStatus === 0) {
+			self.gotoState('running.findmake');
+			return;
+		}
+		self.sc_log.error('failed to run command in zone',
+		    {stderr: errOut});
+		self.gotoState('closing');
+		return;
+	});
+};
+
+SlaveConnection.prototype.state_running.findmake = function (on) {
+	var self = this;
+	var kid = this.spawn('gmake', ['-q', 'check']);
+	on(kid, 'close', function (exitStatus) {
+		if (exitStatus === 0 || exitStatus === 1) {
+			self.gotoState('running.makecheck');
+			return;
+		}
+		if (repoHasMakeCheck[self.sc_change.project] === undefined)
+			repoHasMakeCheck[self.sc_change.project] = false;
+		self.sc_log.warn({status: exitStatus},
+		    'make check first run failed, skipping');
+		self.gotoState('closing');
+	});
+};
+
+SlaveConnection.prototype.state_running.makecheck = function (on) {
+	var self = this;
+	var kid = this.spawn('gmake', ['check']);
+	on(kid, 'close', function (exitStatus) {
+		self.sc_status = exitStatus;
+		if (exitStatus === 0)
+			repoHasMakeCheck[self.sc_change.project] = true;
+		self.sc_log.info({status: exitStatus},
+		    'make check first run done');
+		self.gotoState('running.makecheck2');
+	});
+};
+
+SlaveConnection.prototype.state_running.makecheck2 = function (on) {
+	var self = this;
+	var kid = this.spawn('gmake', ['check']);
+	var out = '';
+	on(kid.stderr, 'data', function (data) {
+		out += data.toString('utf-8');
+	});
+	on(kid.stdout, 'data', function (data) {
+		out += data.toString('utf-8');
+	});
+	on(kid, 'close', function (exitStatus) {
+		self.sc_out = out.split('\n');
+		self.sc_status = exitStatus;
+		self.sc_log.info({status: exitStatus, output: self.sc_out},
+		    'make check done');
+		self.gotoState('running.report');
+	});
+};
+
+var JSL_RE = /^\/tmp\/repo\/([^(:]+)\(([0-9]+)\): (.+)$/;
+var JSL_NULL_RE = /^\/tmp\/repo\/([^(:]+)$/;
+var JSSTYLE_RE = /^([^:]+): ([0-9]+): (.+)$/;
+var ESLINT_FILE_RE = /^\/tmp\/repo\/(.+)$/;
+var ESLINT_RE = /^\s*([0-9]+):[0-9]+\s+([^ ]+)\s\s+(.+)\s\s+(.+)$/;
+var BASHSTY_RE = /^([^:]+): ([0-9]+): (.+)$/;
+
+SlaveConnection.prototype.state_running.report = function (on) {
+	var self = this;
+	var review = {};
+	review.labels = {};
+	if (this.sc_status === 0) {
+		review.message = '"make check" passed ok';
+		review.labels['CI-Testing'] = '+1';
+	} else {
+		review.message = '"make check" exited with status ' +
+		    this.sc_status;
+		review.labels['CI-Testing'] = '-1';
+
+		var comments = [];
+		var ls = this.sc_out;
+		var mode = 'none';
+		var esfile;
+		for (var i = 0; i < ls.length; ++i) {
+			if (ls[i].match(/^\s*$/))
+				continue;
+			if (mode === 'jsl') {
+				var m = ls[i].match(JSL_RE);
+				if (m) {
+					var c = {};
+					c.path = m[1];
+					c.line = parseInt(m[2], 10);
+					c.message = m[3];
+					comments.push(c);
+					continue;
+				} else if (ls[i].match(JSL_NULL_RE)) {
+					continue;
+				} else {
+					mode = 'none';
+				}
+			}
+			if (mode === 'jsstyle') {
+				var m = ls[i].match(JSSTYLE_RE);
+				if (m) {
+					var c = {};
+					c.path = m[1];
+					c.line = parseInt(m[2], 10);
+					c.message = m[3];
+					comments.push(c);
+					continue;
+				} else if (ls[i].match(/^Unescaped left br/)) {
+					continue;
+				} else {
+					mode = 'none';
+				}
+			}
+			if (mode === 'eslint') {
+				var m = ls[i].match(ESLINT_FILE_RE);
+				if (m) {					esfile = m[1];
+					continue;
+				}
+				m = ls[i].match(ESLINT_RE);
+				if (m && esfile !== undefined) {
+					var c = {};
+					c.path = esfile;
+					c.line = parseInt(m[1], 10);
+					c.message = m[3].trim();
+					comments.push(c);
+					continue;
+				} else {
+					mode = 'none';
+				}
+			}
+			if (mode === 'bashsty') {
+				var m = ls[i].match(BASHSTY_RE);
+				if (m) {
+					var c = {};
+					c.path = m[1];
+					c.line = parseInt(m[2], 10);
+					c.message = m[3];
+					comments.push(c);
+					continue;
+				} else {
+					mode = 'none';
+				}
+			}
+			if (ls[i].match(/^deps\/javascriptlint\/build/)) {
+				mode = 'jsl';
+			} else if (ls[i].match(/^deps\/jsstyle/)) {
+				mode = 'jsstyle';
+			} else if (ls[i].match(/^[^ ]+\/eslint /)) {
+				mode = 'eslint';
+			} else if (ls[i].match(/^[^ ]+\/bashstyle /)) {
+				mode = 'bashsty';
+			}
+		}
+
+		review.comments = {};
+		comments.forEach(function (c) {
+			if (review.comments[c.path] === undefined)
+				review.comments[c.path] = [];
+			review.comments[c.path].push(c);
+		});
+
+		if (comments.length < 1) {
+			var lines = this.sc_out.slice(this.sc_out.length - 50,
+			    this.sc_out.length);
+			lines = lines.map(function (v) { return (' ' + v); });
+			review.message += '\n\n' + lines.join('\n');
+		}
+	}
+	var kid = mod_cproc.spawn('ssh', ['-v',
+	    '-i', config.gerrit.keyFile, '-p', config.gerrit.port,
+	    config.gerrit.user + '@' + config.gerrit.host,
+	    'gerrit', 'review',
+	    this.sc_change.number + ',' + this.sc_patchset.number,
+	    '--json', '--project', this.sc_change.project]);
+	kid.stdin.write(JSON.stringify(review));
+	kid.stdin.end();
+	var errOut = '';
+	on(kid.stderr, 'data', function (data) {
+		errOut += data.toString('utf-8');
+	});
+	on(kid, 'close', function (status) {
+		if (status !== 0) {
+			self.sc_log.error({ status: status, stderr: errOut },
+			    'failed to post review');
+		}
+		self.gotoState('closing');
+	});
+};
+
+SlaveConnection.prototype.state_closing = function () {
+	var self = this;
+	try {
+		this.sc_ws.send(JSON.stringify({ op: 'exit' }));
+	} catch (e) {
+	}
+	this.sc_ws.close();
+	var idx = slaves.indexOf(this);
+	mod_assert.notStrictEqual(idx, -1);
+	slaves.splice(idx, 1);
+	if (this.sc_uuid !== undefined) {
+		docker.del('/containers/' + this.sc_uuid + '?force=1',
+		    function (err) {
+			if (err) {
+				self.sc_log.error(err, 'failed to destroy');
+			}
+		});
+	}
+	this.gotoState('closed');
+};
+
+SlaveConnection.prototype.state_closed = function () {
 };
 
 function RemoteReadable() {
@@ -337,11 +662,26 @@ SlaveConnection.prototype.handleMessage = function (msg) {
 		msg.data.forEach(function (d) {
 			stream.push(new Buffer(d, 'base64'));
 		});
+	} else if (msg.event === 'end') {
+		var stream = emitter[msg.stream];
+		stream.push(null);
 	} else if (msg.event === 'spawn') {
 		emitter.emit('spawn', msg.pid);
 		emitter.pid = msg.pid;
 	} else if (msg.event === 'close') {
 		emitter.emit('close', msg.exitStatus);
+	} else if (msg.event === 'done') {
+		emitter.emit('done');
+	} else if (msg.event === 'error') {
+		var err = new Error(msg.error);
+		err.stack = msg.stack;
+		err.code = msg.code;
+		if (msg.stream)
+			emitter[msg.stream].emit('error', err);
+		else
+			emitter.emit('error', err);
+	} else {
+		throw (new Error('Unknown event type ' + msg.event));
 	}
 };
 
@@ -365,6 +705,37 @@ SlaveConnection.prototype.spawn = function (cmd, args, opts) {
 
 	this.sc_kids[cookie] = emitter;
 
+	emitter.on('close', function () {
+		delete (self.sc_kids[cookie]);
+	});
+
+	this.sc_ws.send(JSON.stringify(req));
+
+	return (emitter);
+};
+
+SlaveConnection.prototype.streamFile = function (path) {
+	var self = this;
+	mod_assert.string(path, 'path');
+
+	var cookie = mod_crypto.randomBytes(9).toString('base64');
+	var req = {};
+	req.cookie = cookie;
+	req.op = 'streamfile';
+	req.path = path;
+
+	var emitter = new mod_events.EventEmitter();
+	emitter.stream = new RemoteReadable();
+
+	this.sc_kids[cookie] = emitter;
+
+	emitter.on('error', function () {
+		delete (self.sc_kids[cookie]);
+	});
+	emitter.stream.on('end', function () {
+		delete (self.sc_kids[cookie]);
+	});
+
 	this.sc_ws.send(JSON.stringify(req));
 
 	return (emitter);
@@ -383,140 +754,16 @@ SlaveConnection.prototype.chdir = function (dir) {
 	var emitter = new mod_events.EventEmitter();
 	this.sc_kids[cookie] = emitter;
 
+	emitter.on('done', function () {
+		delete (self.sc_kids[cookie]);
+	});
+	emitter.on('error', function () {
+		delete (self.sc_kids[cookie]);
+	});
+
 	this.sc_ws.send(JSON.stringify(req));
 
 	return (emitter);
-};
-
-SlaveConnection.prototype.state_ready = function (on) {
-	on(this.sc_ws, 'message', function onMessage(msg) {
-		try {
-			msg = JSON.parse(msg);
-		} catch (e) {
-			self.sc_log.error(e,
-			    'failed to parse incoming message');
-			self.gotoState('closing');
-			return;
-		}
-		self.emit('message', msg);
-	});
-	on(this, 'claimAsserted', function () {
-		self.gotoState('running');
-	});
-	on(this.sc_ws, 'close', function () {
-		self.gotoState('closing');
-	});
-};
-
-SlaveConnection.prototype.build = function (change, patchset) {
-	mod_assert.strictEqual(this.getState(), 'ready');
-	this.sc_change = change;
-	this.sc_patchset = patchset;
-	this.emit('claimAsserted');
-};
-
-SlaveConnection.prototype.release = function () {
-	mod_assert.strictEqual(this.getState(), 'running');
-	this.emit('releaseAsserted');
-};
-
-SlaveConnection.prototype.state_running = function (on) {
-	this.sc_log.info('building %s #%d (ps %d)', this.sc_change.project,
-	    this.sc_change.number, this.sc_patchset.number);
-	on(this.sc_ws, 'message', function onMessage(msg) {
-		try {
-			msg = JSON.parse(msg);
-		} catch (e) {
-			self.sc_log.error(e,
-			    'failed to parse incoming message');
-			self.gotoState('closing');
-			return;
-		}
-		self.emit('message', msg);
-	});
-	on(this, 'releaseAsserted', function () {
-		self.gotoState('closing');
-	});
-	on(this.sc_ws, 'close', function () {
-		self.gotoState('closing');
-	});
-	self.gotoState('running.checkout');
-};
-
-SlaveConnection.prototype.state_running.checkout = function (on) {
-	var self = this;
-	var kid = this.spawn('git',
-	    ['clone',
-	    'https://' + config.gerrit.host + '/' + this.sc_change.project,
-	    'repo']);
-	var errOut = '';
-	on(kid.stderr, 'data', function (data) {
-		errOut = errOut + data.toString('utf-8');
-	});
-	on(kid, 'close', function (exitStatus) {
-		if (exitStatus === 0) {
-			self.gotoState('running.chdir');
-			return;
-		}
-		self.sc_log.error('failed to run command in zone',
-		    {stderr: errOut});
-		self.gotoState('closing');
-		return;
-	});
-};
-
-SlaveConnection.prototype.state_running.chdir = function (on) {
-	var self = this;
-	var emitter = this.chdir('repo');
-	on(emitter, 'done', function () {
-		self.gotoState('running.makecheck');
-	});
-	on(emitter, 'error', function () {
-		self.sc_log.error('failed to run command in zone',
-		    {stderr: errOut});
-		self.gotoState('closing');
-		return;
-	});
-};
-
-SlaveConnection.prototype.state_running.makecheck = function (on) {
-	var self = this;
-	var kid = this.spawn('gmake', ['check']);
-	var errOut = '';
-	var out = '';
-	on(kid.stderr, 'data', function (data) {
-		errOut += data.toString('utf-8');
-	});
-	on(kid.stdout, 'data', function (data) {
-		out += data.toString('utf-8');
-	});
-	on(kid, 'close', function (exitStatus) {
-		this.sc_out = out.split('\n');
-		this.sc_err = errOut.split('\n');
-		this.sc_status = exitStatus;
-		log.error({status: exitStatus, stdout: out, stderr: errOut},
-		    'make check done');
-		self.gotoState('running.report');
-	});
-};
-
-SlaveConnection.prototype.state_running.report = function (on) {
-	self.gotoState('closing');
-};
-
-SlaveConnection.prototype.state_closing = function () {
-	try {
-		this.sc_ws.send(JSON.stringify({ op: 'exit' }));
-	} catch (e) {
-	}
-	this.sc_ws.close();
-	var idx = slaves.indexOf(this);
-	mod_assert.notStrictEqual(idx, -1);
-	slaves.splice(idx, 1);
-	this.gotoState('closed');
-};
-
-SlaveConnection.prototype.state_closed = function () {
 };
 
 for (var i = 0; i < config.spares; ++i)
@@ -560,6 +807,8 @@ vsjson.on('readable', function () {
 
 var queue = [];
 function handleNewPatchset(change, ps) {
+	if (repoHasMakeCheck[change.project] === false)
+		return;
 	log.info('queued %s %d (#%d)',
 	    change.project, change.number, ps.number);
 	queue.push([change, ps]);
@@ -570,12 +819,19 @@ function runQueue() {
 	var spares = slaves.filter(function (s) {
 		return (s.getState() === 'ready');
 	});
-	while (spares.length + spawning < config.spares)
+	var settingUp = slaves.filter(function (s) {
+		var st = s.getState();
+		return (st.indexOf('setup') === 0 || st === 'auth');
+	});
+	while (spares.length + settingUp.length + spawning < config.spares)
 		spawnWorker();
 	while (spares.length > 0 && queue.length > 0) {
 		var slave = spares.shift();
 		var item = queue.shift();
+		if (repoHasMakeCheck[item[0].project] === false)
+			continue;
 		slave.build.apply(slave, item);
 	}
 }
 
+setInterval(runQueue, 5000);

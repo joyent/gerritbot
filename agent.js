@@ -45,7 +45,8 @@ function connect() {
 		console.error(err.stack);
 		onClose();
 	});
-	client.on('close', function onClose() {
+	client.on('close', onClose);
+	function onClose() {
 		clearTimeout(timer);
 		if (--retries > 0) {
 			setTimeout(function () {
@@ -55,7 +56,7 @@ function connect() {
 		} else {
 			process.exit(1);
 		}
-	});
+	}
 }
 
 function onMessage(msg) {
@@ -63,6 +64,7 @@ function onMessage(msg) {
 	var cookie = msg.cookie;
 	if (msg.op === 'spawn') {
 		var kid = mod_cp.spawn(msg.cmd, msg.args, msg.opts);
+		console.log('%s: spawning %s %j', cookie, msg.cmd, msg.args);
 		client.send(JSON.stringify({
 			cookie: cookie,
 			event: 'spawn',
@@ -81,6 +83,14 @@ function onMessage(msg) {
 			}
 			client.send(JSON.stringify(evt));
 		});
+		kid.stdout.on('end', function () {
+			var evt = {
+				cookie: cookie,
+				event: 'end',
+				stream: 'stdout'
+			};
+			client.send(JSON.stringify(evt));
+		});
 		kid.stderr.on('readable', function () {
 			var data;
 			var evt = {
@@ -94,7 +104,16 @@ function onMessage(msg) {
 			}
 			client.send(JSON.stringify(evt));
 		});
+		kid.stderr.on('end', function () {
+			var evt = {
+				cookie: cookie,
+				event: 'end',
+				stream: 'stderr'
+			};
+			client.send(JSON.stringify(evt));
+		});
 		kid.on('close', function (status) {
+			console.log('%s: exit %d', cookie, status);
 			client.send(JSON.stringify({
 				cookie: cookie,
 				event: 'close',
@@ -102,6 +121,7 @@ function onMessage(msg) {
 			}));
 		});
 	} else if (msg.op === 'chdir') {
+		console.log('%s: chdir %s', msg.dir);
 		try {
 			process.chdir(msg.dir);
 			client.send(JSON.stringify({
@@ -116,6 +136,40 @@ function onMessage(msg) {
 				stack: e.stack
 			}));
 		}
+	} else if (msg.op === 'streamfile') {
+		console.log('%s: get %s', msg.path);
+		var str = mod_fs.createReadStream(msg.path);
+		str.on('readable', function () {
+			var data;
+			while ((data = str.read()) !== null) {
+				var evt = {
+					cookie: cookie,
+					event: 'data',
+					stream: 'stream',
+					data: [data.toString('base64')]
+				};
+				client.send(JSON.stringify(evt));
+			}
+		});
+		str.on('end', function () {
+			var evt = {
+				cookie: cookie,
+				event: 'end',
+				stream: 'stream'
+			};
+			client.send(JSON.stringify(evt));
+		});
+		str.on('error', function (e) {
+			var evt = {
+				cookie: cookie,
+				event: 'error',
+				stream: 'stream',
+				error: e.toString(),
+				stack: e.stack,
+				code: e.code
+			};
+			client.send(JSON.stringify(evt));
+		});
 	} else if (msg.op === 'kill') {
 		var res = mod_cp.spawnSync('kill', msg.args);
 		client.send(JSON.stringify({
