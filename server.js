@@ -776,7 +776,8 @@ evs.on('readable', function () {
 	var event;
 	while ((event = evs.read()) !== null) {
 		if (event.type === 'patchset-created' &&
-		    event.patchSet.kind === 'REWORK' &&
+		    event.patchSet.kind !== 'NO_CHANGE' &&
+		    event.patchSet.kind !== 'NO_CODE_CHANGE' &&
 		    event.patchSet.isDraft === false) {
 			handleNewPatchset(event.change, event.patchSet);
 		}
