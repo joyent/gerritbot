@@ -136,6 +136,20 @@ function onMessage(msg) {
 				stack: e.stack
 			}));
 		}
+	} else if (msg.op === 'addpath') {
+		console.log('%s: addpath pre %j post %j', msg.pre, msg.post);
+		var paths = process.env.PATH.split(':');
+		(msg.pre || []).forEach(function (p) {
+			paths.unshift(p);
+		});
+		(msg.post || []).forEach(function (p) {
+			paths.push(p);
+		});
+		process.env.PATH = paths.join(':');
+		client.send(JSON.stringify({
+			cookie: cookie,
+			event: 'done'
+		}));
 	} else if (msg.op === 'streamfile') {
 		console.log('%s: get %s', msg.path);
 		var str = mod_fs.createReadStream(msg.path);
