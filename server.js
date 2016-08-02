@@ -690,7 +690,10 @@ SlaveConnection.prototype.state_running.report = function (on) {
 		});
 
 		if (comments.length < 1) {
-			var lines = this.sc_out.slice(this.sc_out.length - 50,
+			var start = this.sc_out.length - 50;
+			if (start < 0)
+				start = 0;
+			var lines = this.sc_out.slice(start,
 			    this.sc_out.length);
 			lines = lines.map(function (v) { return (' ' + v); });
 			review.message += '\n\n' + lines.join('\n');
