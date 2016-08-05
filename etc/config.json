@@ -1,8 +1,8 @@
 {
 	"port": 8080,
 	"my_name": "buildbot.inst.awilson.staging-1.cns.joyent.us",
-	"spares": 2,
-	"max": 5,
+	"spares": 3,
+	"max": 6,
 	"gerrit": {
 		"host": "cr.joyent.us",
 		"port": 22,
