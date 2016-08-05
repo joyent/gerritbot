@@ -39,7 +39,6 @@ var repoHasMakeCheck = {};
 repoHasMakeCheck['joyent/illumos-extra'] = false;
 repoHasMakeCheck['joyent/illumos-joyent'] = false;
 repoHasMakeCheck['joyent/zfs_snapshot_tar'] = false;
-repoHasMakeCheck['joyent/smartos-live'] = false;
 
 var dockerKeyPem = mod_fs.readFileSync(config.docker.keyFile);
 var dockerKey = mod_sshpk.parsePrivateKey(dockerKeyPem);

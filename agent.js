@@ -15,8 +15,12 @@ var PORT = parseInt(process.argv[3], 10);
 var COOKIE = process.argv[4];
 
 process.chdir('/tmp');
+process.env.PWD = '/tmp';
 process.env.PATH =
     '/opt/local/sbin:/opt/local/bin:/usr/gnu/bin:/usr/bin:/usr/sbin:/bin:/sbin';
+process.env.LANG = 'C';
+process.env.LC_ALL = 'C';
+process.env.TERM = 'vt100';
 
 var UUID = mod_cp.spawnSync('zonename').stdout.toString('ascii').trim();
 
@@ -124,6 +128,7 @@ function onMessage(msg) {
 		console.log('%s: chdir %s', msg.dir);
 		try {
 			process.chdir(msg.dir);
+			process.env.PWD = process.cwd();
 			client.send(JSON.stringify({
 				cookie: cookie,
 				event: 'done'
