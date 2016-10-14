@@ -13,7 +13,7 @@
     "bunyan": "^1.8.1",
     "gerritbot": "^1.0.0",
     "lstream": "0.0.4",
-    "mooremachine": "^1.2.0",
+    "mooremachine": "^2.0.0",
     "restify-clients": "^1.3.0",
     "sshpk": "^1.10.0",
     "vasync": "^1.6.4",
