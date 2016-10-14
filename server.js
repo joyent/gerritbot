@@ -6,7 +6,6 @@
  * Copyright (c) 2016, Joyent, Inc.
  */
 
-const mod_gw = require('./lib/gerrit-watcher');
 const mod_ws = require('ws');
 const mod_assert = require('assert-plus');
 const mod_fs = require('fs');
@@ -19,8 +18,6 @@ const mod_restify = require('restify-clients');
 const mod_sshpk = require('sshpk');
 const mod_tls = require('tls');
 const mod_cproc = require('child_process');
-const mod_lstream = require('lstream');
-const mod_vsjson = require('vstream-json-parser');
 const mod_events = require('events');
 const mod_http = require('http');
 const mod_vasync = require('vasync');
@@ -48,6 +45,15 @@ var id = mod_sshpk.identityFromDN('CN=' + config.docker.user);
 var cert = mod_sshpk.createSelfSignedCertificate(id, dockerKey);
 
 config.gerrit.log = log;
+config.gerrit.recovery = {
+	default: {
+		timeout: 10000,
+		maxTimeout: 30000,
+		delay: 2000,
+		maxDelay: 10000,
+		retries: Infinity
+	}
+};
 var gerrit = new mod_gbot.Client(config.gerrit);
 
 var docker = mod_restify.createJsonClient({
@@ -116,7 +122,7 @@ function spawnWorker() {
 		} else {
 			var cid = obj.Id.slice(0, 12);
 			log.info('created docker container %s', cid);
-			docker.post('/containers/' + cid + '/start',
+			docker.post('/containers/' + cid + '/start', {},
 			    function (err2) {
 				if (err2) {
 					delete (spawning[spawnCookie]);
@@ -898,7 +904,7 @@ evs.on('bootstrap', function () {
 	var qstream = gerrit.queryStream(q, incl);
 	qstream.on('readable', function () {
 		var change;
-		while ((change = vsjson.read()) !== null) {
+		while ((change = qstream.read()) !== null) {
 			if (change.project === undefined ||
 			    change.id === undefined) {
 				continue;
@@ -909,9 +915,9 @@ evs.on('bootstrap', function () {
 		}
 	});
 });
-evs.on('readable', function () {
+evs.stream.on('readable', function () {
 	var event;
-	while ((event = evs.read()) !== null) {
+	while ((event = evs.stream.read()) !== null) {
 		if (event.type === 'patchset-created' &&
 		    event.patchSet.kind !== 'NO_CHANGE' &&
 		    event.patchSet.kind !== 'NO_CODE_CHANGE' &&
