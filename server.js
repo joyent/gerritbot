@@ -24,6 +24,7 @@ const mod_vsjson = require('vstream-json-parser');
 const mod_events = require('events');
 const mod_http = require('http');
 const mod_vasync = require('vasync');
+const mod_gbot = require('gerritbot');
 
 var config = JSON.parse(
     mod_fs.readFileSync('etc/config.json').toString('utf-8'));
@@ -33,17 +34,21 @@ mod_assert.optionalNumber(config.port, 'config.port');
 if (config.port === undefined)
 	config.port = 8080;
 
-var log = mod_bunyan.createLogger({ name: 'gerritbot' });
+var log = mod_bunyan.createLogger({ name: 'makecheckbot' });
 
 var repoHasMakeCheck = {};
 repoHasMakeCheck['joyent/illumos-extra'] = false;
 repoHasMakeCheck['joyent/illumos-joyent'] = false;
 repoHasMakeCheck['joyent/zfs_snapshot_tar'] = false;
+repoHasMakeCheck['joyent/illumos-kvm'] = false;
 
 var dockerKeyPem = mod_fs.readFileSync(config.docker.keyFile);
 var dockerKey = mod_sshpk.parsePrivateKey(dockerKeyPem);
 var id = mod_sshpk.identityFromDN('CN=' + config.docker.user);
 var cert = mod_sshpk.createSelfSignedCertificate(id, dockerKey);
+
+config.gerrit.log = log;
+var gerrit = new mod_gbot.Client(config.gerrit);
 
 var docker = mod_restify.createJsonClient({
 	url: 'https://' + config.docker.host + ':2376',
@@ -538,6 +543,10 @@ SlaveConnection.prototype.state_running.checkout = function (on) {
 SlaveConnection.prototype.state_running.findmake = function (on) {
 	var self = this;
 	var kid = this.spawn('gmake', ['-q', 'check']);
+	var errOut = '';
+	on(kid.stderr, 'data', function (data) {
+		errOut = errOut + data.toString('utf-8');
+	});
 	on(kid, 'close', function (exitStatus) {
 		if (exitStatus === 0 || exitStatus === 1) {
 			self.gotoState('running.makecheck');
@@ -545,7 +554,7 @@ SlaveConnection.prototype.state_running.findmake = function (on) {
 		}
 		if (repoHasMakeCheck[self.sc_change.project] === undefined)
 			repoHasMakeCheck[self.sc_change.project] = false;
-		self.sc_log.warn({status: exitStatus},
+		self.sc_log.warn({status: exitStatus, stderr: errOut},
 		    'make check first run failed, skipping');
 		self.gotoState('closing');
 	});
@@ -698,25 +707,15 @@ SlaveConnection.prototype.state_running.report = function (on) {
 			review.message += '\n\n' + lines.join('\n');
 		}
 	}
-	var kid = mod_cproc.spawn('ssh', ['-v',
-	    '-i', config.gerrit.keyFile, '-p', config.gerrit.port,
-	    config.gerrit.user + '@' + config.gerrit.host,
-	    'gerrit', 'review',
-	    this.sc_change.number + ',' + this.sc_patchset.number,
-	    '--json', '--project', this.sc_change.project]);
-	kid.stdin.write(JSON.stringify(review));
-	kid.stdin.end();
-	var errOut = '';
-	on(kid.stderr, 'data', function (data) {
-		errOut += data.toString('utf-8');
-	});
-	on(kid, 'close', function (status) {
-		if (status !== 0) {
-			self.sc_log.error({ status: status, stderr: errOut },
+	review.project = this.sc_change.project;
+	var spec = this.sc_change.number + ',' + this.sc_patchset.number;
+	gerrit.review(spec, review, S.callback(function (err) {
+		if (err) {
+			self.sc_log.error({ err: err },
 			    'failed to post review');
 		}
 		self.gotoState('closing');
-	});
+	}));
 };
 
 SlaveConnection.prototype.state_closing = function () {
@@ -893,9 +892,24 @@ SlaveConnection.prototype.addPath = function (post, pre) {
 for (var i = 0; i < config.spares; ++i)
 	spawnWorker();
 
-config.gerrit.log = log;
-var watcher = new mod_gw.GerritWatcher(config.gerrit);
-var evs = watcher.eventStream();
+var evs = gerrit.eventStream();
+evs.on('bootstrap', function () {
+	var q = 'status:open AND NOT label:CI-Testing>=-1';
+	var incl = ['patch-sets'];
+	var qstream = gerrit.queryStream(q, incl);
+	qstream.on('readable', function () {
+		var change;
+		while ((change = vsjson.read()) !== null) {
+			if (change.project === undefined ||
+			    change.id === undefined) {
+				continue;
+			}
+			var ps = change.patchSets[change.patchSets.length - 1];
+			if (ps.isDraft === false)
+				handleNewPatchset(change, ps);
+		}
+	});
+});
 evs.on('readable', function () {
 	var event;
 	while ((event = evs.read()) !== null) {
@@ -905,28 +919,6 @@ evs.on('readable', function () {
 		    event.patchSet.isDraft === false) {
 			handleNewPatchset(event.change, event.patchSet);
 		}
-	}
-});
-
-var kid = mod_cproc.spawn('ssh', ['-v', '-i', config.gerrit.keyFile,
-    '-p', config.gerrit.port, config.gerrit.user + '@' + config.gerrit.host,
-    'gerrit', 'query', '--format=JSON', '--patch-sets',
-    'status:open', 'AND', 'NOT', 'label:CI-Testing>=-1']);
-
-var outls = new mod_lstream();
-var vsjson = new mod_vsjson();
-
-kid.stdout.pipe(outls);
-outls.pipe(vsjson);
-
-vsjson.on('readable', function () {
-	var change;
-	while ((change = vsjson.read()) !== null) {
-		if (change.project === undefined || change.id === undefined)
-			continue;
-		var ps = change.patchSets[change.patchSets.length - 1];
-		if (ps.isDraft === false)
-			handleNewPatchset(change, ps);
 	}
 });
 
