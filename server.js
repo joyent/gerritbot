@@ -47,10 +47,10 @@ var cert = mod_sshpk.createSelfSignedCertificate(id, dockerKey);
 config.gerrit.log = log;
 config.gerrit.recovery = {
 	default: {
-		timeout: 10000,
-		maxTimeout: 30000,
-		delay: 2000,
-		maxDelay: 10000,
+		timeout: 20000,
+		maxTimeout: 60000,
+		delay: 5000,
+		maxDelay: 15000,
 		retries: Infinity
 	}
 };
@@ -104,6 +104,7 @@ function spawnWorker() {
 		Volumes: {},
 		WorkingDir: '/tmp',
 		NetworkDisabled: false,
+		NetworkMode: config.docker.network,
 		ExposedPorts: {},
 		StopSignal: 'SIGTERM',
 		HostConfig: {

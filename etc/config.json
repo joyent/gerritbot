@@ -12,7 +12,8 @@
 	"docker": {
 		"host": "docker.staging-2.cns.joyent.us",
 		"user": "awilson",
-		"keyFile": "./sdc.id_rsa"
+		"keyFile": "./sdc.id_rsa",
+		"network": "unwashed"
 	},
 	"slaves": {
 		"image": "96bcddda-beb7-11e5-af20-a3fb54c8ae29",
