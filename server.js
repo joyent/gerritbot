@@ -807,9 +807,14 @@ SlaveConnection.prototype.spawn = function (cmd, args, opts) {
 
 	this.sc_kids[cookie] = emitter;
 
-	emitter.on('close', function () {
-		delete (self.sc_kids[cookie]);
-	});
+	var ended = 0;
+	function onEnd() {
+		if (++ended >= 3)
+			delete (self.sc_kids[cookie]);
+	}
+	emitter.on('close', onEnd);
+	emitter.stdout.on('end', onEnd);
+	emitter.stderr.on('end', onEnd);
 
 	this.sc_ws.send(JSON.stringify(req));
 
