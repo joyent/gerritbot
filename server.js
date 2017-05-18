@@ -719,6 +719,47 @@ SlaveConnection.prototype.state_running.report = function (S) {
 		if (err) {
 			self.sc_log.error({ err: err },
 			    'failed to post review');
+			/*
+			 * If we hit
+			 * <https://bugs.chromium.org/p/gerrit/issues/detail?id=3475>
+			 * then fallback to a dumber report that doesn't try
+			 * to match 'make check' output to patchset files.
+			 * See arekinath/gerritbot#1.
+			 */
+			var marker = 'not found in revision';
+			if (err.message.search(marker) !== -1) {
+				S.gotoState('running.reportfallback');
+				return;
+			}
+		}
+		S.gotoState('closing');
+	}));
+};
+
+SlaveConnection.prototype.state_running.reportfallback = function (S) {
+	mod_assert.ok(this.sc_status !== 0,
+	    'this impl assumes the "make check" failed');
+
+	var self = this;
+	var review = {};
+	review.labels = {};
+	review.message = '"make check" exited with status ' + this.sc_status;
+	review.labels['CI-Testing'] = '-1';
+
+	var start = this.sc_out.length - 50;
+	if (start < 0)
+		start = 0;
+	var lines = this.sc_out.slice(start,
+	    this.sc_out.length);
+	lines = lines.map(function (v) { return (' ' + v); });
+	review.message += '\n\n' + lines.join('\n');
+
+	review.project = this.sc_change.project;
+	var spec = this.sc_change.number + ',' + this.sc_patchset.number;
+	gerrit.review(spec, review, S.callback(function (err) {
+		if (err) {
+			self.sc_log.error({ err: err },
+			    'failed to post review (reportfallback)');
 		}
 		S.gotoState('closing');
 	}));
