@@ -726,7 +726,8 @@ SlaveConnection.prototype.state_running.report = function (S) {
 			 * to match 'make check' output to patchset files.
 			 * See arekinath/gerritbot#1.
 			 */
-			if (err.message.search('not found in revision')) {
+			var marker = 'not found in revision';
+			if (err.message.search(marker) !== -1) {
 				S.gotoState('running.reportfallback');
 				return;
 			}
