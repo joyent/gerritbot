@@ -7,6 +7,7 @@
  * Copyright (c) 2016, Joyent, Inc.
  */
 
+const mod_fs = require('fs');
 const mod_ws = require('ws');
 const mod_cp = require('child_process');
 

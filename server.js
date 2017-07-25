@@ -16,8 +16,6 @@ const mod_crypto = require('crypto');
 const mod_stream = require('stream');
 const mod_restify = require('restify-clients');
 const mod_sshpk = require('sshpk');
-const mod_tls = require('tls');
-const mod_cproc = require('child_process');
 const mod_events = require('events');
 const mod_http = require('http');
 const mod_vasync = require('vasync');
@@ -111,7 +109,7 @@ function spawnWorker() {
 			Binds: [],
 			Links: [],
 			LxcConf: {'lxc.utsname': 'docker'},
-			Memory: 2048*1024*1024,
+			Memory: 2048 * 1024 * 1024,
 			Dns: ['8.8.8.8', '8.8.4.4']
 		}
 	};
@@ -138,7 +136,7 @@ function spawnWorker() {
 				}
 			});
 		}
-	})
+	});
 }
 
 var slaves = [];
@@ -173,7 +171,7 @@ function SlaveConnection(opts) {
 	this.sc_log = opts.log;
 	this.sc_ws = undefined;
 	if (this.sc_log === undefined)
-		this.sc_log = bunyan.createLogger({ name: 'connection '});
+		this.sc_log = mod_bunyan.createLogger({ name: 'connection '});
 	this.sc_config = opts.config;
 	this.sc_uuid = undefined;
 	this.sc_kids = {};
@@ -647,13 +645,15 @@ SlaveConnection.prototype.state_running.report = function (S) {
 		var ls = this.sc_out;
 		var mode = 'none';
 		var esfile;
+		var c, m;
+
 		for (var i = 0; i < ls.length; ++i) {
 			if (ls[i].match(/^\s*$/))
 				continue;
 			if (mode === 'jsl') {
-				var m = ls[i].match(JSL_RE);
+				m = ls[i].match(JSL_RE);
 				if (m) {
-					var c = {};
+					c = {};
 					c.path = m[1];
 					c.line = parseInt(m[2], 10);
 					c.message = m[3];
@@ -666,9 +666,9 @@ SlaveConnection.prototype.state_running.report = function (S) {
 				}
 			}
 			if (mode === 'jsstyle') {
-				var m = ls[i].match(JSSTYLE_RE);
+				m = ls[i].match(JSSTYLE_RE);
 				if (m) {
-					var c = {};
+					c = {};
 					c.path = m[1];
 					c.line = parseInt(m[2], 10);
 					c.message = m[3];
@@ -681,14 +681,14 @@ SlaveConnection.prototype.state_running.report = function (S) {
 				}
 			}
 			if (mode === 'eslint') {
-				var m = ls[i].match(ESLINT_FILE_RE);
+				m = ls[i].match(ESLINT_FILE_RE);
 				if (m) {
 					esfile = m[1];
 					continue;
 				}
 				m = ls[i].match(ESLINT_RE);
 				if (m && esfile !== undefined) {
-					var c = {};
+					c = {};
 					c.path = esfile;
 					c.line = parseInt(m[1], 10);
 					c.message = m[3].trim();
@@ -699,9 +699,9 @@ SlaveConnection.prototype.state_running.report = function (S) {
 				}
 			}
 			if (mode === 'bashsty') {
-				var m = ls[i].match(BASHSTY_RE);
+				m = ls[i].match(BASHSTY_RE);
 				if (m) {
-					var c = {};
+					c = {};
 					c.path = m[1];
 					c.line = parseInt(m[2], 10);
 					c.message = m[3];
@@ -723,10 +723,10 @@ SlaveConnection.prototype.state_running.report = function (S) {
 		}
 
 		review.comments = {};
-		comments.forEach(function (c) {
-			if (review.comments[c.path] === undefined)
-				review.comments[c.path] = [];
-			review.comments[c.path].push(c);
+		comments.forEach(function (comment) {
+			if (review.comments[comment.path] === undefined)
+				review.comments[comment.path] = [];
+			review.comments[comment.path].push(comment);
 		});
 
 		if (comments.length < 1) {
@@ -796,6 +796,7 @@ SlaveConnection.prototype.state_closing = function (S) {
 	try {
 		this.sc_ws.send(JSON.stringify({ op: 'exit' }));
 	} catch (e) {
+		this.sc_log.warn({ err: e }, 'failed to send exit message');
 	}
 	this.sc_ws.close();
 	var idx = slaves.indexOf(this);
@@ -819,20 +820,22 @@ function RemoteReadable() {
 	mod_stream.Readable.call(this, {});
 }
 mod_util.inherits(RemoteReadable, mod_stream.Readable);
-RemoteReadable.prototype._read = function (size) {
+RemoteReadable.prototype._read = function (_size) {
 };
 
 SlaveConnection.prototype.handleMessage = function (msg) {
 	mod_assert.string(msg.cookie, 'msg.cookie');
 	var emitter = this.sc_kids[msg.cookie];
 	mod_assert.object(emitter, 'emitter for ' + msg.cookie);
+	var stream;
+
 	if (msg.event === 'data') {
-		var stream = emitter[msg.stream];
+		stream = emitter[msg.stream];
 		msg.data.forEach(function (d) {
 			stream.push(new Buffer(d, 'base64'));
 		});
 	} else if (msg.event === 'end') {
-		var stream = emitter[msg.stream];
+		stream = emitter[msg.stream];
 		stream.push(null);
 	} else if (msg.event === 'spawn') {
 		emitter.emit('spawn', msg.pid);
@@ -1035,7 +1038,7 @@ function runQueue() {
 		    slaves.length + countSpawning);
 	}
 
-	for (var i = 0; i < toMake; ++i)
+	for (var j = 0; j < toMake; ++j)
 		spawnWorker();
 
 	while (spares.length > 0 && queue.length > 0) {

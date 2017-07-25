@@ -1,0 +1,21 @@
+{
+    "plugins": [ "joyent" ],
+    "extends": [
+        "eslint:recommended",
+        "plugin:joyent/style",
+        "plugin:joyent/lint"
+    ],
+    "parserOptions": {
+        "ecmaVersion": 6,
+        "sourceType": "script",
+        "ecmaFeatures": {
+        }
+    },
+    "env": {
+        "es6": true,
+        "node": true
+    },
+    "rules": {
+        "no-mixed-spaces-and-tabs": "off"
+    }
+}
