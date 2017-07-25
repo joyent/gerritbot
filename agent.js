@@ -24,15 +24,18 @@ process.env.TERM = 'vt100';
 
 var UUID = mod_cp.spawnSync('zonename').stdout.toString('ascii').trim();
 
-var client;
 var retries = 3;
 var timeout = 5000;
 var delay = 5000;
 
 function connect() {
+	var client;
+
 	var timer = setTimeout(function () {
 		timer = undefined;
 		client.close();
+		client.terminate();
+		onClose();
 	}, timeout);
 	timeout *= 2;
 
@@ -44,26 +47,30 @@ function connect() {
 			uuid: UUID
 		}));
 	});
-	client.on('message', onMessage);
-	client.on('error', function (err) {
-		console.error(err.stack);
-		onClose();
-	});
+	client.on('message', onMessage.bind(null, client));
+	client.on('error', onError);
 	client.on('close', onClose);
 	function onClose() {
-		clearTimeout(timer);
+		if (timer === undefined)
+			clearTimeout(timer);
+		client.removeListener('message', onMessage);
+		client.removeListener('error', onError);
+		client.removeListener('close', onClose);
 		if (--retries > 0) {
-			setTimeout(function () {
-				connect();
-			}, delay);
+			setTimeout(connect, delay);
 			delay *= 2;
 		} else {
 			process.exit(1);
 		}
 	}
+	function onError(err) {
+		console.error(err.stack);
+		client.terminate();
+		onClose();
+	}
 }
 
-function onMessage(msg) {
+function onMessage(client, msg) {
 	msg = JSON.parse(msg);
 	var cookie = msg.cookie;
 	if (msg.op === 'spawn') {
@@ -85,7 +92,8 @@ function onMessage(msg) {
 			while ((data = kid.stdout.read()) !== null) {
 				evt.data.push(data.toString('base64'));
 			}
-			client.send(JSON.stringify(evt));
+			if (evt.data.length > 0)
+				client.send(JSON.stringify(evt));
 		});
 		kid.stdout.on('end', function () {
 			var evt = {
@@ -106,7 +114,8 @@ function onMessage(msg) {
 			while ((data = kid.stderr.read()) !== null) {
 				evt.data.push(data.toString('base64'));
 			}
-			client.send(JSON.stringify(evt));
+			if (evt.data.length > 0)
+				client.send(JSON.stringify(evt));
 		});
 		kid.stderr.on('end', function () {
 			var evt = {

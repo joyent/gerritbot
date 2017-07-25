@@ -47,8 +47,8 @@ var cert = mod_sshpk.createSelfSignedCertificate(id, dockerKey);
 config.gerrit.log = log;
 config.gerrit.recovery = {
 	default: {
-		timeout: 20000,
-		maxTimeout: 60000,
+		timeout: 30000,
+		maxTimeout: 120000,
 		delay: 5000,
 		maxDelay: 15000,
 		retries: Infinity
@@ -177,6 +177,7 @@ function SlaveConnection(opts) {
 	this.sc_config = opts.config;
 	this.sc_uuid = undefined;
 	this.sc_kids = {};
+	this.sc_lastMsg = [];
 	slaves.push(this);
 	mod_fsm.FSM.call(this, 'idle');
 }
@@ -213,7 +214,9 @@ SlaveConnection.prototype.state_auth = function (S) {
 			S.gotoState('closing');
 			return;
 		}
-		if (msg.cookie === COOKIE) {
+		var keys = Object.keys(msg).sort();
+		if (msg.cookie === COOKIE && keys.length === 2 &&
+		    keys[0] === 'cookie' && keys[1] === 'uuid') {
 			self.sc_uuid = msg.uuid.replace(/-/g, '');
 			var cid = self.sc_uuid.slice(0, 12);
 			delete (spawning[cid]);
@@ -301,7 +304,7 @@ SlaveConnection.prototype.state_setup.npm = function (S) {
 			S.gotoState('closing');
 			return;
 		}
-		S.gotoState('setup.jsl_clone');
+		S.gotoState('setup.clean_old');
 	});
 	function processPkgsrc(instr, cb) {
 		var cmd = 'pfexec';
@@ -321,6 +324,29 @@ SlaveConnection.prototype.state_setup.npm = function (S) {
 			cb(new Error('npm command failed'));
 		});
 	}
+};
+
+SlaveConnection.prototype.state_setup.clean_old = function (S) {
+	var self = this;
+	var kid = this.spawn('rm',
+	    ['-rf',
+	    '/home/build/jsstyle',
+	    '/home/build/javascriptlint',
+	    '/tmp/repo']);
+	var errOut = '';
+	S.on(kid.stderr, 'data', function (data) {
+		errOut = errOut + data.toString('utf-8');
+	});
+	S.on(kid, 'close', function (exitStatus) {
+		if (exitStatus === 0) {
+			S.gotoState('setup.jsl_clone');
+			return;
+		}
+		self.sc_log.error('failed to run command in zone',
+		    {stderr: errOut});
+		S.gotoState('closing');
+		return;
+	});
 };
 
 SlaveConnection.prototype.state_setup.jsl_clone = function (S) {
@@ -718,7 +744,7 @@ SlaveConnection.prototype.state_running.report = function (S) {
 	gerrit.review(spec, review, S.callback(function (err) {
 		if (err) {
 			self.sc_log.error({ err: err },
-			    'failed to post review');
+			    'failed to post review (report)');
 			/*
 			 * If we hit
 			 * <https://bugs.chromium.org/p/gerrit/issues/detail?id=3475>
@@ -826,6 +852,9 @@ SlaveConnection.prototype.handleMessage = function (msg) {
 	} else {
 		throw (new Error('Unknown event type ' + msg.event));
 	}
+	this.sc_lastMsg.push(msg);
+	if (this.sc_lastMsg.length > 8)
+		this.sc_lastMsg.shift();
 };
 
 SlaveConnection.prototype.spawn = function (cmd, args, opts) {
