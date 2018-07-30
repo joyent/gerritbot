@@ -36,6 +36,7 @@ repoHasMakeCheck['joyent/illumos-extra'] = false;
 repoHasMakeCheck['joyent/illumos-joyent'] = false;
 repoHasMakeCheck['joyent/zfs_snapshot_tar'] = false;
 repoHasMakeCheck['joyent/illumos-kvm'] = false;
+repoHasMakeCheck['joyent/postgres'] = false;
 
 var dockerKeyPem = mod_fs.readFileSync(config.docker.keyFile);
 var dockerKey = mod_sshpk.parsePrivateKey(dockerKeyPem);
