@@ -20,6 +20,8 @@ const mod_events = require('events');
 const mod_http = require('http');
 const mod_vasync = require('vasync');
 const mod_gbot = require('gerritbot');
+const mod_jade = require('jade');
+const mod_qs = require('querystring');
 
 var config = JSON.parse(
     mod_fs.readFileSync('etc/config.json').toString('utf-8'));
@@ -65,10 +67,11 @@ var docker = mod_restify.createJsonClient({
 const COOKIE = mod_crypto.randomBytes(8).toString('base64');
 
 var spawning = {};
+var queue = [];
 
 function spawnWorker() {
 	var spawnCookie = mod_crypto.randomBytes(8).toString('base64');
-	spawning[spawnCookie] = true;
+	spawning[spawnCookie] = 'provisioning';
 	var agentUrl =
 	    'http://' + config.my_name + ':' + config.port + '/agent.js';
 	var payload = {
@@ -90,7 +93,7 @@ function spawnWorker() {
 			'pkgin -y up && ' +
 			'pkgin -y in nodejs && ' +
 			'curl -O ' + agentUrl + ' && ' +
-			'npm install ws && ' +
+			'npm install ws mooremachine && ' +
 			'/usr/lib/pfexecd && ' +
 			'exec su - build -c "' +
 				'exec node /tmp/agent.js ' + config.my_name +
@@ -122,6 +125,7 @@ function spawnWorker() {
 		} else {
 			var cid = obj.Id.slice(0, 12);
 			log.info('created docker container %s', cid);
+			spawning[spawnCookie] = 'booting';
 			docker.post('/containers/' + cid + '/start', {},
 			    function (err2) {
 				if (err2) {
@@ -131,7 +135,7 @@ function spawnWorker() {
 					    cid);
 				} else {
 					delete (spawning[spawnCookie]);
-					spawning[cid] = true;
+					spawning[cid] = 'booting';
 					log.info('started docker container %s',
 					    cid);
 				}
@@ -141,8 +145,31 @@ function spawnWorker() {
 }
 
 var slaves = [];
+var evs;
 var httpServer = mod_http.createServer();
 var server = new mod_ws.Server({ server: httpServer });
+
+var tplCache = {};
+function getTpl(fn) {
+	var stat = mod_fs.statSync(fn);
+	var cache = tplCache[fn];
+	if (cache && stat.mtime.getTime() <= cache.mtime.getTime())
+		return (cache.func);
+
+	var tpl = mod_fs.readFileSync(fn, 'utf-8');
+	var func;
+	try {
+		func = mod_jade.compile(tpl, {
+			filename: fn,
+			pretty: true
+		});
+	} catch (e) {
+		log.error(e, 'failed to compile template');
+		func = function () { return ('Error'); };
+	}
+	tplCache[fn] = { mtime: stat.mtime, func: func };
+	return (func);
+}
 
 server.on('connection', function onConnection(ws) {
 	var conn = new SlaveConnection({
@@ -157,6 +184,72 @@ httpServer.on('request', function (req, res) {
 	if (req.url === '/agent.js') {
 		res.writeHead(200);
 		mod_fs.createReadStream('./agent.js').pipe(res);
+	} else if (req.url === '/status') {
+		var tpl = getTpl('./status.html.tpl');
+		var vars = {
+			slaves: slaves,
+			overrides: repoHasMakeCheck,
+			queue: queue,
+			spawning: spawning
+		};
+		var html;
+		try {
+			html = tpl(vars);
+		} catch (e) {
+			html = e.stack;
+		}
+		res.writeHead(200, {
+			'content-type': 'text/html'
+		});
+		res.write(html);
+		res.end();
+	} else if (req.url === '/override' && req.method === 'POST') {
+		var formdata = '';
+		req.on('readable', function () {
+			var chunk;
+			while ((chunk = req.read()) !== null) {
+				formdata += chunk.toString('utf-8');
+			}
+		});
+		req.on('end', function () {
+			var args = mod_qs.parse(formdata);
+			if (args && args.repo) {
+				if (args.clear) {
+					delete (repoHasMakeCheck[args.repo]);
+				} else if (args.value) {
+					repoHasMakeCheck[args.repo] =
+					    (args.value === 'true');
+				}
+				res.writeHead(303, { 'location': '/status' });
+				res.end();
+			} else {
+				res.writeHead(500);
+				res.end();
+			}
+		});
+	} else if (req.url === '/bootstrap' && req.method === 'POST') {
+		evs.emit('bootstrap');
+		res.writeHead(303, { 'location': '/status' });
+		res.end();
+	} else if (req.url === '/runquery' && req.method === 'POST') {
+		var formdata = '';
+		req.on('readable', function () {
+			var chunk;
+			while ((chunk = req.read()) !== null) {
+				formdata += chunk.toString('utf-8');
+			}
+		});
+		req.on('end', function () {
+			var args = mod_qs.parse(formdata);
+			if (args && args.query) {
+				runQuery(args.query);
+				res.writeHead(303, { 'location': '/status' });
+				res.end();
+			} else {
+				res.writeHead(500);
+				res.end();
+			}
+		});
 	} else {
 		res.writeHead(404);
 		res.end();
@@ -201,6 +294,15 @@ SlaveConnection.prototype.state_idle = function (S) {
 
 SlaveConnection.prototype.state_auth = function (S) {
 	var self = this;
+	var others = slaves.filter(function (sc) {
+		return (!(sc.isInState('closed') || sc.isInState('closing')) &&
+		    sc.sc_uuid === self.sc_uuid && sc !== self);
+	});
+	if (others.length > 0) {
+		self.sc_log.error('duplicate client');
+		S.gotoState('closing');
+		return;
+	}
 	S.timeout(5000, function () {
 		S.gotoState('closing');
 	});
@@ -977,9 +1079,11 @@ SlaveConnection.prototype.addPath = function (post, pre) {
 for (var i = 0; i < config.spares; ++i)
 	spawnWorker();
 
-var evs = gerrit.eventStream();
+evs = gerrit.eventStream();
 evs.on('bootstrap', function () {
-	var q = 'status:open AND NOT label:CI-Testing>=-1';
+	runQuery('status:open AND NOT label:CI-Testing>=-1');
+});
+function runQuery(q) {
 	var incl = ['patch-sets'];
 	var qstream = gerrit.queryStream(q, incl);
 	qstream.on('readable', function () {
@@ -994,7 +1098,7 @@ evs.on('bootstrap', function () {
 				handleNewPatchset(change, ps);
 		}
 	});
-});
+}
 evs.stream.on('readable', function () {
 	var event;
 	while ((event = evs.stream.read()) !== null) {
@@ -1007,7 +1111,6 @@ evs.stream.on('readable', function () {
 	}
 });
 
-var queue = [];
 function handleNewPatchset(change, ps) {
 	if (repoHasMakeCheck[change.project] === false)
 		return;

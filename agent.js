@@ -10,6 +10,8 @@
 const mod_fs = require('fs');
 const mod_ws = require('ws');
 const mod_cp = require('child_process');
+const mod_fsm = require('mooremachine');
+const mod_util = require('util');
 
 var SERVER = process.argv[2];
 var PORT = parseInt(process.argv[3], 10);
@@ -25,51 +27,86 @@ process.env.TERM = 'vt100';
 
 var UUID = mod_cp.spawnSync('zonename').stdout.toString('ascii').trim();
 
-var retries = 3;
-var timeout = 5000;
-var delay = 5000;
-
-function connect() {
-	var client;
-
-	var timer = setTimeout(function () {
-		timer = undefined;
-		client.close();
-		client.terminate();
-		onClose();
-	}, timeout);
-	timeout *= 2;
-
-	client = new mod_ws('ws://' + SERVER + ':' + PORT + '/');
-	client.on('open', function onOpen() {
-		clearTimeout(timer);
-		client.send(JSON.stringify({
-			cookie: COOKIE,
-			uuid: UUID
-		}));
-	});
-	client.on('message', onMessage.bind(null, client));
-	client.on('error', onError);
-	client.on('close', onClose);
-	function onClose() {
-		if (timer === undefined)
-			clearTimeout(timer);
-		client.removeListener('message', onMessage);
-		client.removeListener('error', onError);
-		client.removeListener('close', onClose);
-		if (--retries > 0) {
-			setTimeout(connect, delay);
-			delay *= 2;
-		} else {
-			process.exit(1);
-		}
-	}
-	function onError(err) {
-		console.error(err.stack);
-		client.terminate();
-		onClose();
-	}
+function AgentFSM() {
+	this.af_retries = 5;
+	this.af_timeout = 5000;
+	this.af_delay = 3000;
+	this.af_lastError = undefined;
+	this.af_client = undefined;
+	mod_fsm.FSM.call(this, 'init');
 }
+mod_util.inherits(AgentFSM, mod_fsm.FSM);
+
+AgentFSM.prototype.connect = function () {
+	this.emit('connectAsserted');
+};
+
+AgentFSM.prototype.state_init = function (S) {
+	S.on(this, 'connectAsserted', function () {
+		S.gotoState('connecting');
+	});
+};
+
+AgentFSM.prototype.state_connecting = function (S) {
+	var self = this;
+
+	this.af_client = new mod_ws('ws://' + SERVER + ':' + PORT + '/');
+
+	S.on(this.af_client, 'open', function () {
+		S.gotoState('connected');
+	});
+	S.on(this.af_client, 'error', function (err) {
+		self.af_lastError = err;
+		S.gotoState('error');
+	});
+	S.on(this.af_client, 'close', function () {
+		self.af_lastError = new Error('"close" emitted before connect');
+		S.gotoState('error');
+	});
+	S.timeout(this.af_timeout, function () {
+		self.af_lastError = new Error('Connect timeout');
+		S.gotoState('error');
+	});
+};
+
+AgentFSM.prototype.state_error = function (S) {
+	console.error(this.af_lastError.stack);
+
+	if (--this.af_retries <= 0) {
+		console.error('Ran out of retries, giving up');
+		process.exit(1);
+		return;
+	}
+
+	this.af_client.on('error', function () { });
+	this.af_client.terminate();
+	this.af_client = undefined;
+
+	S.timeout(this.af_delay, function () {
+		S.gotoState('connecting');
+	});
+	this.af_timeout *= 2;
+};
+
+AgentFSM.prototype.state_connected = function (S) {
+	var self = this;
+
+	S.on(this.af_client, 'message', function (msg) {
+		onMessage(self.af_client, msg);
+	});
+	S.on(this.af_client, 'error', function (err) {
+		self.af_lastError = err;
+		S.gotoState('error');
+	});
+	S.on(this.af_client, 'close', function () {
+		self.af_lastError = new Error('Websocket closed unexpectedly');
+		S.gotoState('error');
+	});
+	this.af_client.send(JSON.stringify({
+		cookie: COOKIE,
+		uuid: UUID
+	}));
+};
 
 function onMessage(client, msg) {
 	msg = JSON.parse(msg);
@@ -213,4 +250,5 @@ function onMessage(client, msg) {
 	}
 }
 
-connect();
+var fsm = new AgentFSM();
+fsm.connect();

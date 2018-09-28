@@ -12,6 +12,7 @@
     "assert-plus": "^1.0.0",
     "bunyan": "^1.8.1",
     "gerritbot": "^1.0.0",
+    "jade": "^1.11.0",
     "lstream": "0.0.4",
     "mooremachine": "^2.0.0",
     "restify-clients": "^1.3.0",
