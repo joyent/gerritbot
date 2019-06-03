@@ -1,0 +1,52 @@
+:toc: left
+:source-highlighter: pygments
+:doctype: book
+:idprefix:
+:docinfo:
+
+# gerritbot
+
+## About
+
+This is the bot that takes care of running `make check` on new code reviews and
+patchsets pushed to https://cr.joyent.us/[cr.joyent.us].
+
+## Configuration
+
+The configuration file contains the following values:
+
+- `"my_name"`, the host name workers should use to connect back to the
+  supervisor server
+- `"port"`, the port that the supervisor server should listen on
+- `"spares"`, the number of spare worker zones to maintain
+- `"max"`, the maximum number of worker zones that should be allowed to run
+- `"dryrun"`, a boolean indicating whether the `"make check"` results should be
+  posted to Gerrit
+- `"gerrit"`, an object describing how to connect to Gerrit:
+    -- `"host"`, the Gerrit instance's hostname
+    -- `"port"`, the SSH port that Gerrit is listening on
+    -- `"user"`, the user to listen and post as to Gerrit
+    -- `"keyFile"`, a path to an SSH key for the `"user"`
+- `"docker"`, an object describing how to connect to Docker:
+    -- `"host"`, a Triton Docker hostname
+    -- `"network"`, the name of the network that the workers should be placed on
+    -- `"user"`, the user to authenticate as
+    -- `"keyFile"`, a path to an SSH key for the `"user"`
+- `"repos"`, an object describing configurations for repository processing
+    -- `"check"`, a map of project names to booleans indicating whether to force
+      disable or enable `"make check"` for a repo
+- `"workers"`, an object describing the configuration for the worker zones:
+    -- `"image"`, the image UUID to provision
+    -- `"pkgsrc"`, a list of pkgsrc packages to install (or remove if they begin
+      with `-`)
+    -- `"memory"`, the amount of memory (in megabytes) each worker zone should
+      have
+    -- `"npm"`, npm packages that should be installed globally
+
+## License
+
+MPL-v2
+
+## Contributing
+
+Contributions should be made via https://cr.joyent.us[Joyent Gerrit].

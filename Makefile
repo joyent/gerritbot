@@ -1,6 +1,6 @@
 NPM		:= npm
 ESLINT		= ./node_modules/.bin/eslint
-JS_FILES	:= $(wildcard *.js)
+JS_FILES	:= $(wildcard *.js) $(wildcard lib/*.js)
 
 $(ESLINT): | $(NPM_EXEC)
 	$(NPM) install \

@@ -3,6 +3,7 @@
 	"my_name": "buildbot.inst.awilson.staging-1.cns.joyent.us",
 	"spares": 3,
 	"max": 6,
+	"dryrun": false,
 	"gerrit": {
 		"host": "cr.joyent.us",
 		"port": 22,
@@ -15,9 +16,30 @@
 		"keyFile": "./sdc.id_rsa",
 		"network": "external"
 	},
-	"slaves": {
-		"image": "96bcddda-beb7-11e5-af20-a3fb54c8ae29",
-		"pkgsrc": ["-nodejs", "nodejs-0.10", "build-essential"],
+	"repos": {
+		"check": {
+			"joyent/haproxy-1.8": false,
+			"joyent/illumos-extra": false,
+			"joyent/illumos-joyent": false,
+			"joyent/illumos-kvm": false,
+			"joyent/illumos-kvm-cmd": false,
+			"joyent/mako-gc-feeder": false,
+			"joyent/manta-muskie": false,
+			"joyent/manta-scripts": false,
+			"joyent/mdata-client": false,
+			"joyent/mname-balancer": false,
+			"joyent/mountain-gorilla": false,
+			"joyent/pg_prefaulter": false,
+			"joyent/postgres": false,
+			"joyent/sdc-scripts": false,
+			"joyent/zfs_snapshot_tar": false,
+			"joyent/zoneinit": false
+		}
+	},
+	"workers": {
+		"image": "c193a558-1d63-11e9-97cf-97bb3ee5c14f",
+		"pkgsrc": ["-nodejs", "nodejs-6.14", "npm", "build-essential", "gcc49"],
+		"memory": 2048,
 		"npm": []
 	}
 }
