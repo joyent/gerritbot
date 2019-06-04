@@ -35,6 +35,9 @@ The configuration file contains the following values:
 - `"repos"`, an object describing configurations for repository processing
     -- `"check"`, a map of project names to booleans indicating whether to force
       disable or enable `"make check"` for a repo
+    -- `"test"`, a map of project names to booleans indicating whether to run
+      `"make test"` on this repo. Only repos set to `true` in the configuration
+      will currently be run.
 - `"workers"`, an object describing the configuration for the worker zones:
     -- `"image"`, the image UUID to provision
     -- `"pkgsrc"`, a list of pkgsrc packages to install (or remove if they begin
