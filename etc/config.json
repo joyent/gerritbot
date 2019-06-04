@@ -1,9 +1,9 @@
 {
 	"port": 8080,
-	"my_name": "buildbot.inst.awilson.staging-1.cns.joyent.us",
-	"spares": 3,
-	"max": 6,
-	"dryrun": false,
+	"my_name": "172.20.5.189",
+	"spares": 2,
+	"max": 4,
+	"dryrun": true,
 	"gerrit": {
 		"host": "cr.joyent.us",
 		"port": 22,
