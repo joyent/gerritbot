@@ -67,12 +67,12 @@ html(lang="en")
             td= uuid
             td= spawning[uuid]
             td none
-        each slave in slaves
+        each worker in workers
           tr
-            td= slave.sc_uuid
-            td= slave.getState()
-            if slave.sc_change !== undefined
-              td #{slave.sc_change.project}: #{slave.sc_change.number}/#{slave.sc_patchset.number}
+            td= worker.wc_uuid
+            td= worker.getState()
+            if worker.wc_change !== undefined
+              td #{worker.wc_change.project}: #{worker.wc_change.number}/#{worker.wc_patchset.number}
             else
               td none
     .section
