@@ -22,7 +22,7 @@
     "vasync": "^1.6.4",
     "verror": "^1.6.1",
     "vstream-json-parser": "^1.0.0",
-    "ws": "^1.1.1"
+    "ws": "^7.1.2"
   },
   "devDependencies": {
     "eslint": "2.13.1",
