@@ -47,6 +47,3 @@ The configuration file contains the following values:
 
 MPL-v2
 
-## Contributing
-
-Contributions should be made via https://cr.joyent.us[Joyent Gerrit].
